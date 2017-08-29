@@ -3,29 +3,32 @@ package com.paezand.uber.ui.navigation;
 import android.Manifest;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.graphics.BitmapFactory;
 import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.Handler;
 import android.support.annotation.NonNull;
 import android.support.v4.app.ActivityCompat;
 import android.support.v4.app.FragmentActivity;
 import android.support.v4.content.ContextCompat;
-import android.os.Bundle;
 import android.view.View;
 import android.widget.Button;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import com.google.android.gms.maps.CameraUpdate;
 import com.google.android.gms.maps.CameraUpdateFactory;
 import com.google.android.gms.maps.GoogleMap;
 import com.google.android.gms.maps.MapFragment;
 import com.google.android.gms.maps.OnMapReadyCallback;
+import com.google.android.gms.maps.model.BitmapDescriptorFactory;
 import com.google.android.gms.maps.model.LatLng;
+import com.google.android.gms.maps.model.LatLngBounds;
 import com.google.android.gms.maps.model.MarkerOptions;
 import com.paezand.uber.R;
-import com.paezand.uber.data.UserLocation;
 import com.paezand.uber.ui.main.MainActivity;
 import com.parse.FindCallback;
 import com.parse.ParseException;
@@ -54,17 +57,19 @@ public class RiderActivity extends FragmentActivity implements OnMapReadyCallbac
     @BindView(R.id.info_text)
     protected TextView infoTextView;
 
-    LocationManager locationManager;
+    private LocationManager locationManager;
 
-    LocationListener locationListener;
+    private LocationListener locationListener;
 
-    GoogleMap gMap;
+    private GoogleMap gMap;
 
     private Location lastKnowLocation;
 
     private boolean isActiveRequest = false;
 
     final Handler handler = new Handler();
+
+    boolean isDriverActive;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -101,7 +106,11 @@ public class RiderActivity extends FragmentActivity implements OnMapReadyCallbac
             @Override
             public void onLocationChanged(final Location location) {
                 lastKnowLocation = location;
-                updateLocation();
+                if (isDriverActive) {
+                    checkForUpdates();
+                } else {
+                    updateLocation();
+                }
             }
 
             @Override
@@ -200,42 +209,91 @@ public class RiderActivity extends FragmentActivity implements OnMapReadyCallbac
                             @Override
                             public void done(List<ParseUser> objects, ParseException e) {
                                 if (e == null && objects.size() > 0){
+                                    isDriverActive = true;
                                     ParseGeoPoint driverLocation = objects.get(0).getParseGeoPoint("location");
 
                                     if (ContextCompat.checkSelfPermission(RiderActivity.this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
                                         locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, 0, 0, locationListener);
-
                                         Location location = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER);
 
                                         if (location != null) {
                                             ParseGeoPoint userLocation = new ParseGeoPoint(location.getLatitude(), location.getLongitude());
-
                                             Double distanceInMiles = driverLocation.distanceInMilesTo(userLocation);
 
-                                            Double distanceOnDP = (double) Math.round(distanceInMiles * 10) / 10;
+                                            if (distanceInMiles < 0.01) {
+                                                updateLocation();
+                                                infoTextView.setText("Your driver is here!!");
 
-                                            infoTextView.setText("Your driver is "+distanceOnDP.toString() +" miles away!");
+                                                ParseQuery<ParseObject> query = ParseQuery.getQuery("Request");
+                                                query.whereEqualTo("username", ParseUser.getCurrentUser().getUsername());
 
+                                                query.findInBackground(new FindCallback<ParseObject>() {
+                                                    @Override
+                                                    public void done(List<ParseObject> objects, ParseException e) {
+                                                        if (e == null) {
+                                                            for (ParseObject object : objects) {
+                                                                object.deleteInBackground();
+                                                            }
+                                                        }
+                                                    }
+                                                });
+                                                handler.postDelayed(new Runnable() {
+                                                    @Override
+                                                    public void run() {
+                                                        isDriverActive = false;
+                                                        isActiveRequest = false;
+                                                        manageButton.setText("Call an Uber");
+                                                        manageButton.setVisibility(View.VISIBLE);
+
+                                                    }
+                                                }, 5000);
+                                            } else {
+                                                Double distanceOnDP = (double) Math.round(distanceInMiles * 10) / 10;
+                                                infoTextView.setText("Your driver is " + distanceOnDP.toString() + " miles away!");
+                                                addDriverAndRiderMarksToMap(driverLocation, userLocation);
+                                                manageButton.setVisibility(View.INVISIBLE);
+                                                handler.postDelayed(new Runnable() {
+                                                    @Override
+                                                    public void run() {
+                                                        checkForUpdates();
+                                                    }
+                                                }, 2000);
+                                            }
                                         }
-
                                     }
                                 }
                             }
                         });
 
 
-                        manageButton.setVisibility(View.INVISIBLE);
+
 
                     }
-                    handler.postDelayed(new Runnable() {
-                        @Override
-                        public void run() {
-                            checkForUpdates();
-                        }
-                    }, 2000);
+
                 }
             }
         });
+    }
+
+    private void addDriverAndRiderMarksToMap(@NonNull final ParseGeoPoint driverLocation,
+                                             @NonNull final ParseGeoPoint userLocation) {
+        LatLng driverPosition = new LatLng(driverLocation.getLatitude(), driverLocation.getLongitude());
+        LatLng userPosition = new LatLng(userLocation.getLatitude(), userLocation.getLongitude());
+        gMap.clear();
+
+        gMap.addMarker(new MarkerOptions().position(driverPosition).title("Driver")
+                        .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_GREEN)));
+        gMap.addMarker(new MarkerOptions().position(userPosition).title("User")
+                        .icon(BitmapDescriptorFactory.defaultMarker(BitmapDescriptorFactory.HUE_BLUE)));
+
+        final LatLngBounds bounds = new LatLngBounds.Builder()
+                .include(driverPosition)
+                .include(userPosition)
+                .build();
+
+        CameraUpdate cameraUpdate = CameraUpdateFactory.newLatLngBounds(bounds, 50);
+
+        gMap.moveCamera(cameraUpdate);
     }
 
     @OnClick(R.id.logout_button)
